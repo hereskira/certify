@@ -79,6 +79,16 @@ def generate_certificates(args):
     for _, participant in df.iterrows():
         generate_certificate(participant, args.event, args.template, output_dir)
 
+def list_events(args):
+    events = [f for f in os.listdir(EVENTS_DIR) if os.path.isdir(os.path.join(EVENTS_DIR, f))]
+    if not events:
+        print("No events found.")
+        return
+    print("Existing events:")
+    for e in events:
+        # Convert underscores back to spaces for readability
+        print(f"- {e.replace('_', ' ')}")
+
 # ------------------------
 # Argument Parser
 # ------------------------
@@ -101,6 +111,10 @@ parser_gen = subparsers.add_parser("generate")
 parser_gen.add_argument("--event", required=True)
 parser_gen.add_argument("--template", default="default_template.png")
 parser_gen.set_defaults(func=generate_certificates)
+
+# List existing events
+parser_list = subparsers.add_parser("list-events")
+parser_list.set_defaults(func=list_events)
 
 # ------------------------
 # Main
