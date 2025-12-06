@@ -4,8 +4,8 @@ import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
 from PyQt5.QtWidgets import (
-    QApplication, QWidget, QVBoxLayout, QPushButton, QFileDialog,
-    QLabel, QLineEdit, QMessageBox, QTextEdit, QComboBox, QGroupBox
+    QApplication, QWidget, QVBoxLayout, QHBoxLayout, QPushButton, QFileDialog,
+    QLabel, QLineEdit, QMessageBox, QTextEdit, QComboBox, QGroupBox, QScrollArea, QWidgetItem
 )
 from PyQt5.QtGui import QPixmap
 
@@ -14,11 +14,14 @@ from PyQt5.QtGui import QPixmap
 # ------------------------
 EVENTS_DIR = "events"
 TEMPLATES_DIR = "templates"
+BACKUP_DIR = "backups"
+
 os.makedirs(EVENTS_DIR, exist_ok=True)
 os.makedirs(TEMPLATES_DIR, exist_ok=True)
+os.makedirs(BACKUP_DIR, exist_ok=True)
 
 # ------------------------
-# Helper functions
+# Helper Functions
 # ------------------------
 def load_template(template_path):
     if not os.path.exists(template_path):
@@ -27,7 +30,6 @@ def load_template(template_path):
 
 def draw_text(image, text, position, font_size=40):
     draw = ImageDraw.Draw(image)
-
     font_path = "/System/Library/Fonts/Helvetica.ttc"
     try:
         font = ImageFont.truetype(font_path, font_size)
@@ -43,74 +45,61 @@ def draw_text(image, text, position, font_size=40):
 
     draw.text((x, y), text, fill="black", font=font)
 
-# ----------------------------------------------------------
-# Certificate Generator with signature at bottom
-# ----------------------------------------------------------
-def generate_certificate(
-    participant, event_title, template_path, output_dir,
-    signatory_name, signatory_position, signature_img_path
-):
+# ------------------------
+# Certificate Generation
+# ------------------------
+def generate_certificate(participant, event_title, template_path, output_dir, signatories):
     image = load_template(template_path)
+    img_w, img_h = image.size
 
-    # Participant name
+    # Participant info
     draw_text(image, participant['name'], position=(1000, 680), font_size=70)
-
     org = participant.get('org', 'Organization')
-
     raw_date = participant.get("date", datetime.today().strftime("%Y-%m-%d"))
     try:
         formatted_date = datetime.strptime(raw_date, "%Y-%m-%d").strftime("%B %d, %Y")
     except:
         formatted_date = raw_date
+    draw_text(image, f"for participating in the {event_title} held by {org}", position=(1000, 830), font_size=32)
+    draw_text(image, f"on {formatted_date}", position=(1000, 900), font_size=32)
 
-    draw_text(
-        image,
-        f"for participating in the {event_title} held by {org}",
-        position=(1000, 830),
-        font_size=32
-    )
-
-    draw_text(
-        image,
-        f"on {formatted_date}",
-        position=(1000, 900),
-        font_size=32
-    )
-
-    # ---------------------------------------------------
-    # Signatory block at the bottom
-    # ---------------------------------------------------
-    img_w, img_h = image.size
-
+    # Signatory block at bottom
     bottom_signature_y = img_h - 210
     bottom_name_y = img_h - 140
     bottom_position_y = img_h - 90
 
-    # Signature image (optional)
-    if signature_img_path and os.path.exists(signature_img_path):
-        sig = Image.open(signature_img_path).convert("RGBA")
+    num_signatories = len(signatories)
+    if num_signatories == 0:
+        pass  # no signatories to draw
+    else:
+        for i, sig in enumerate(signatories):
+            # Calculate horizontal positions
+            if num_signatories == 1:
+                x = img_w // 2
+            elif num_signatories == 2:
+                x = img_w // 3 if i == 0 else 2 * img_w // 3
+            elif num_signatories == 3:
+                x = img_w // 4 if i == 0 else img_w // 2 if i == 1 else 3 * img_w // 4
 
-        max_width = int(img_w * 0.22)
-        ratio = max_width / sig.width
-        new_height = int(sig.height * ratio)
-        sig = sig.resize((max_width, new_height))
+            # Signature image
+            if sig['signature_path'] and os.path.exists(sig['signature_path']):
+                s_img = Image.open(sig['signature_path']).convert("RGBA")
+                max_width = int(img_w * 0.18)
+                ratio = max_width / s_img.width
+                new_height = int(s_img.height * ratio)
+                s_img = s_img.resize((max_width, new_height))
+                sig_x = x - s_img.width // 2
+                sig_y = bottom_signature_y - new_height // 2
+                image.paste(s_img, (sig_x, sig_y), s_img)
 
-        sig_x = (img_w // 2) - (sig.width // 2)
-        sig_y = bottom_signature_y - (new_height // 2)
-
-        image.paste(sig, (sig_x, sig_y), sig)
-
-    # Signatory name
-    draw_text(image, signatory_name, position=(img_w // 2, bottom_name_y), font_size=40)
-
-    # Signatory title
-    draw_text(image, signatory_position, position=(img_w // 2, bottom_position_y), font_size=32)
+            # Name and position
+            draw_text(image, sig['name'], position=(x, bottom_name_y), font_size=40)
+            draw_text(image, sig['position'], position=(x, bottom_position_y), font_size=32)
 
     # Save PDF
-    safe_name = participant['name'].replace(" ", "_")
-    pdf_path = os.path.join(output_dir, f"{safe_name}.pdf")
+    name_safe = participant['name'].replace(" ", "_")
+    pdf_path = os.path.join(output_dir, f"{name_safe}.pdf")
     image.save(pdf_path, "PDF", resolution=100.0)
-
     return pdf_path
 
 # ------------------------
@@ -119,115 +108,121 @@ def generate_certificate(
 class CertifyGUI(QWidget):
     def __init__(self):
         super().__init__()
-
         self.setWindowTitle("Certify Certificate Generator")
-        self.setGeometry(300, 100, 550, 700)
+        self.setGeometry(300, 100, 600, 800)
 
-        self.signature_path = None
+        self.signatories = []  # list of dicts {name, position, signature_path}
 
-        layout = QVBoxLayout()
+        main_layout = QVBoxLayout()
 
-        # ----------------------------------------------------
         # Event group
-        # ----------------------------------------------------
         event_group = QGroupBox("Event Management")
         event_layout = QVBoxLayout()
-
         event_layout.addWidget(QLabel("Select Event"))
         self.event_combo = QComboBox()
         event_layout.addWidget(self.event_combo)
-
         btn_refresh = QPushButton("Refresh Events")
         btn_refresh.clicked.connect(self.refresh_event_list)
         event_layout.addWidget(btn_refresh)
-
         event_layout.addWidget(QLabel("Create Event"))
         self.new_event_input = QLineEdit()
         event_layout.addWidget(self.new_event_input)
-
         btn_create = QPushButton("Create")
         btn_create.clicked.connect(self.create_event)
         event_layout.addWidget(btn_create)
-
         event_group.setLayout(event_layout)
-        layout.addWidget(event_group)
+        main_layout.addWidget(event_group)
 
-        # ----------------------------------------------------
-        # Signatory group
-        # ----------------------------------------------------
-        sign_group = QGroupBox("Signatory Details")
+        # Signatories group
+        sign_group = QGroupBox("Signatories (Up to 3)")
         sign_layout = QVBoxLayout()
+        self.signatories_layout = QVBoxLayout()
+        sign_layout.addLayout(self.signatories_layout)
 
-        sign_layout.addWidget(QLabel("Name of Signatory"))
-        self.signatory_name_input = QLineEdit()
-        sign_layout.addWidget(self.signatory_name_input)
+        btn_add_sign = QPushButton("Add Signatory")
+        btn_add_sign.clicked.connect(self.add_signatory)
+        sign_layout.addWidget(btn_add_sign)
 
-        sign_layout.addWidget(QLabel("Position or Title"))
-        self.signatory_position_input = QLineEdit()
-        sign_layout.addWidget(self.signatory_position_input)
-
-        # Upload signature
-        self.upload_sig_btn = QPushButton("Upload Signature Image Optional")
-        self.upload_sig_btn.clicked.connect(self.upload_signature)
-        sign_layout.addWidget(self.upload_sig_btn)
-
-        self.signature_preview = QLabel("(No signature uploaded)")
-        self.signature_preview.setStyleSheet("color: gray;")
-        sign_layout.addWidget(self.signature_preview)
+        btn_remove_sign = QPushButton("Remove Last Signatory")
+        btn_remove_sign.clicked.connect(self.remove_signatory)
+        sign_layout.addWidget(btn_remove_sign)
 
         sign_group.setLayout(sign_layout)
-        layout.addWidget(sign_group)
+        main_layout.addWidget(sign_group)
 
-        # ----------------------------------------------------
         # Certificate processing
-        # ----------------------------------------------------
         cert_group = QGroupBox("Certificate Processing")
         cert_layout = QVBoxLayout()
-
         btn_csv = QPushButton("Import Participants CSV")
         btn_csv.clicked.connect(self.add_participants_csv)
         cert_layout.addWidget(btn_csv)
-
         btn_generate = QPushButton("Generate Certificates")
         btn_generate.clicked.connect(self.generate_certificates)
         cert_layout.addWidget(btn_generate)
-
         cert_group.setLayout(cert_layout)
-        layout.addWidget(cert_group)
+        main_layout.addWidget(cert_group)
 
-        # ----------------------------------------------------
-        # Log output
-        # ----------------------------------------------------
+        # Output log
         self.output_log = QTextEdit()
         self.output_log.setReadOnly(True)
-        layout.addWidget(self.output_log)
+        main_layout.addWidget(self.output_log)
 
-        self.setLayout(layout)
-
+        self.setLayout(main_layout)
         self.refresh_event_list()
 
-    # ----------------------------------------------------
-    # GUI functions
-    # ----------------------------------------------------
-    def upload_signature(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Upload Signature", "", "Image Files (*.png *.jpg *.jpeg)"
-        )
-        if path:
-            self.signature_path = path
-            preview = QPixmap(path).scaledToWidth(150)
-            self.signature_preview.setPixmap(preview)
-            self.output_log.append(f"Signature uploaded: {path}")
+    # ------------------------
+    # Signatory Methods
+    # ------------------------
+    def add_signatory(self):
+        if len(self.signatories) >= 3:
+            QMessageBox.warning(self, "Limit reached", "You can only have up to 3 signatories.")
+            return
+        widget = QWidget()
+        layout = QHBoxLayout()
+        name_input = QLineEdit()
+        name_input.setPlaceholderText("Name")
+        position_input = QLineEdit()
+        position_input.setPlaceholderText("Position/Title")
+        sig_btn = QPushButton("Upload Signature")
+        preview = QLabel("(No signature)")
+        sig_data = {"widget": widget, "name_input": name_input, "position_input": position_input, "sig_btn": sig_btn, "preview": preview, "signature_path": None}
 
+        def upload_sig():
+            path, _ = QFileDialog.getOpenFileName(self, "Upload Signature", "", "Image Files (*.png *.jpg *.jpeg)")
+            if path:
+                sig_data['signature_path'] = path
+                pix = QPixmap(path).scaledToWidth(100)
+                preview.setPixmap(pix)
+        sig_btn.clicked.connect(upload_sig)
+
+        layout.addWidget(name_input)
+        layout.addWidget(position_input)
+        layout.addWidget(sig_btn)
+        layout.addWidget(preview)
+        widget.setLayout(layout)
+        self.signatories_layout.addWidget(widget)
+        self.signatories.append(sig_data)
+
+    def remove_signatory(self):
+        if self.signatories:
+            sig_data = self.signatories.pop()
+            widget = sig_data['widget']
+            for i in reversed(range(widget.layout().count())):
+                item = widget.layout().itemAt(i)
+                if isinstance(item, QWidgetItem):
+                    item.widget().setParent(None)
+            self.signatories_layout.removeWidget(widget)
+            widget.setParent(None)
+
+    # ------------------------
+    # Event Methods
+    # ------------------------
     def refresh_event_list(self):
         self.event_combo.clear()
-        events = [
-            d.replace("_", " ")
-            for d in os.listdir(EVENTS_DIR)
-            if os.path.isdir(os.path.join(EVENTS_DIR, d))
-        ]
+        events = [d.replace("_", " ") for d in os.listdir(EVENTS_DIR) if os.path.isdir(os.path.join(EVENTS_DIR, d))]
         if events:
             self.event_combo.addItems(events)
+            self.event_combo.setCurrentIndex(0)
             self.output_log.append("Loaded events.")
         else:
             self.output_log.append("No events found.")
@@ -237,78 +232,73 @@ class CertifyGUI(QWidget):
         if not title:
             QMessageBox.warning(self, "Error", "Enter an event name.")
             return
-
         path = os.path.join(EVENTS_DIR, title.replace(" ", "_"))
         os.makedirs(path, exist_ok=True)
-
         self.output_log.append(f"Event created: {title}")
         self.new_event_input.clear()
         self.refresh_event_list()
 
+    # ------------------------
+    # CSV Methods
+    # ------------------------
     def add_participants_csv(self):
         event = self.event_combo.currentText().strip()
         if not event:
             QMessageBox.warning(self, "Error", "Select an event.")
             return
-
         event_path = os.path.join(EVENTS_DIR, event.replace(" ", "_"))
-
         file_path, _ = QFileDialog.getOpenFileName(self, "Select CSV", "", "CSV Files (*.csv)")
         if not file_path:
             return
-
         df = pd.read_csv(file_path)
         df.to_csv(os.path.join(event_path, "participants.csv"), index=False)
-
         self.output_log.append(f"Imported {len(df)} participants.")
 
+    # ------------------------
+    # Certificate Methods
+    # ------------------------
     def generate_certificates(self):
         event = self.event_combo.currentText().strip()
         if not event:
             QMessageBox.warning(self, "Error", "Select an event.")
             return
-
         event_path = os.path.join(EVENTS_DIR, event.replace(" ", "_"))
         participants_csv = os.path.join(event_path, "participants.csv")
-
         if not os.path.exists(participants_csv):
             QMessageBox.warning(self, "Error", "No participants CSV.")
             return
-
-        sign_name = self.signatory_name_input.text().strip()
-        sign_pos = self.signatory_position_input.text().strip()
-
-        if not sign_name or not sign_pos:
-            QMessageBox.warning(self, "Error", "Enter signatory name and title.")
+        # Gather signatories
+        signatory_data = []
+        for sig in self.signatories:
+            name = sig['name_input'].text().strip()
+            pos = sig['position_input'].text().strip()
+            if name and pos:
+                signatory_data.append({"name": name, "position": pos, "signature_path": sig['signature_path']})
+        if not signatory_data:
+            QMessageBox.warning(self, "Error", "Enter at least one signatory.")
             return
-
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = os.path.join(event_path, "certificates", timestamp)
         os.makedirs(output_dir, exist_ok=True)
-
-        template_file, _ = QFileDialog.getOpenFileName(
-            self, "Select Template", TEMPLATES_DIR, "Images (*.png *.jpg *.jpeg)"
-        )
+        template_file, _ = QFileDialog.getOpenFileName(self, "Select Template", TEMPLATES_DIR, "Images (*.png *.jpg *.jpeg)")
         if not template_file:
             template_file = os.path.join(TEMPLATES_DIR, "default_template.png")
-
         df = pd.read_csv(participants_csv)
-
         for _, participant in df.iterrows():
-            pdf_path = generate_certificate(
-                participant,
-                event,
-                template_file,
-                output_dir,
-                sign_name,
-                sign_pos,
-                self.signature_path
-            )
+            pdf_path = generate_certificate(participant, event, template_file, output_dir, signatory_data)
             self.output_log.append(f"Generated: {pdf_path}")
+        # Backup
+        import shutil
+        backup_time = datetime.now().strftime("%Y%m%d_%H%M%S")
+        clean_event_name = event.replace(" ", "_")
+        backup_folder_name = f"backup_{clean_event_name}_{backup_time}"
+        backup_path = os.path.join(BACKUP_DIR, backup_folder_name)
+        shutil.copytree(output_dir, backup_path)
+        self.output_log.append(f"Backup saved to: {backup_path}")
 
-# ----------------------------------------------------
+# ------------------------
 # Main
-# ----------------------------------------------------
+# ------------------------
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = CertifyGUI()
