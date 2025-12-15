@@ -1,5 +1,6 @@
 import sys
 import os
+import json
 import pandas as pd
 from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
@@ -22,6 +23,18 @@ os.makedirs(BACKUP_DIR, exist_ok=True)
 # ------------------------
 # Helper Functions
 # ------------------------
+def load_event_metadata(event_path):
+    metadata_path = os.path.join(event_path, "event.json")
+    if os.path.exists(metadata_path):
+        try:
+            with open(metadata_path, "r") as f:
+                data = json.load(f)
+            return data
+        except:
+            return {"organization": "", "start_date": "", "end_date": ""}
+    else:
+        return {"organization": "", "start_date": "", "end_date": ""}
+
 def load_template(template_path):
     if not os.path.exists(template_path):
         return Image.new("RGB", (1200, 900), color="white")
@@ -44,18 +57,12 @@ def draw_text(image, text, position, font_size=40):
 # ------------------------
 # Certificate Generation
 # ------------------------
-def generate_certificate(participant, event_title, template_path, output_dir, signatories):
+def generate_certificate(participant, event_title, event_org, event_dates, template_path, output_dir, signatories):
     image = load_template(template_path)
     img_w, img_h = image.size
     draw_text(image, participant['name'], position=(1000, 680), font_size=70)
-    org = participant.get('org', 'Organization')
-    raw_date = participant.get("date", datetime.today().strftime("%Y-%m-%d"))
-    try:
-        formatted_date = datetime.strptime(raw_date, "%Y-%m-%d").strftime("%B %d, %Y")
-    except:
-        formatted_date = raw_date
-    draw_text(image, f"for participating in the {event_title} held by {org}", position=(1000, 830), font_size=32)
-    draw_text(image, f"on {formatted_date}", position=(1000, 900), font_size=32)
+    draw_text(image, f"for participating in the {event_title} held by {event_org}", position=(1000, 830), font_size=32)
+    draw_text(image, f"on {event_dates}", position=(1000, 900), font_size=32)
 
     bottom_signature_y = img_h - 210
     bottom_name_y = img_h - 140
@@ -104,11 +111,10 @@ class CertifyGUI(QWidget):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Certify: Certificate Generator")
-        self.setGeometry(300, 100, 950, 650)
+        self.setGeometry(300, 100, 950, 700)
         self.setStyleSheet(MODERN_STYLE)
         self.signatories = []
 
-        # Scroll area
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         container = QWidget()
@@ -116,27 +122,38 @@ class CertifyGUI(QWidget):
 
         main_layout = QVBoxLayout(self)
         main_layout.addWidget(scroll)
-
-        content_layout = QHBoxLayout(container)  # Two columns
+        content_layout = QHBoxLayout(container)
 
         # LEFT COLUMN
         left_col = QVBoxLayout()
-
-        # Event group
         event_group = QGroupBox("Event Management")
         event_layout = QVBoxLayout()
         event_layout.addWidget(QLabel("Select Event:"))
         self.event_combo = QComboBox()
+        self.event_combo.currentIndexChanged.connect(self.load_event_metadata_ui)
         event_layout.addWidget(self.event_combo)
         btn_refresh = QPushButton("Refresh Events")
         btn_refresh.clicked.connect(self.refresh_event_list)
         event_layout.addWidget(btn_refresh)
         event_layout.addWidget(QLabel("Create Event:"))
         self.new_event_input = QLineEdit()
+        self.new_event_input.setPlaceholderText("Enter Event Name")
         event_layout.addWidget(self.new_event_input)
+        self.event_org_input = QLineEdit()
+        self.event_org_input.setPlaceholderText("Event Organization / Host")
+        event_layout.addWidget(self.event_org_input)
+        self.event_start_input = QLineEdit()
+        self.event_start_input.setPlaceholderText("Start Date (YYYY-MM-DD)")
+        event_layout.addWidget(self.event_start_input)
+        self.event_end_input = QLineEdit()
+        self.event_end_input.setPlaceholderText("End Date (YYYY-MM-DD)")
+        event_layout.addWidget(self.event_end_input)
         btn_create = QPushButton("Create Event")
         btn_create.clicked.connect(self.create_event)
         event_layout.addWidget(btn_create)
+        btn_delete = QPushButton("Delete Selected Event")
+        btn_delete.clicked.connect(self.delete_event)
+        event_layout.addWidget(btn_delete)
         event_group.setLayout(event_layout)
         left_col.addWidget(event_group)
 
@@ -171,7 +188,6 @@ class CertifyGUI(QWidget):
         cert_group.setLayout(cert_layout)
         right_col.addWidget(cert_group)
 
-        # Log output
         self.output_log = QTextEdit()
         self.output_log.setReadOnly(True)
         self.output_log.setMinimumHeight(350)
@@ -182,44 +198,47 @@ class CertifyGUI(QWidget):
 
         self.refresh_event_list()
 
-    # ---------------- SIGNATORIES ----------------
+    def load_event_metadata_ui(self):
+        event = self.event_combo.currentText().strip()
+        if not event:
+            self.event_org_input.clear()
+            self.event_start_input.clear()
+            self.event_end_input.clear()
+            return
+        event_path = os.path.join(EVENTS_DIR, event.replace(" ", "_"))
+        metadata = load_event_metadata(event_path)
+        self.event_org_input.setText(metadata.get("organization", ""))
+        self.event_start_input.setText(metadata.get("start_date", ""))
+        self.event_end_input.setText(metadata.get("end_date", ""))
+
+    # Signatories
     def add_signatory(self):
         if len(self.signatories) >= 3:
             QMessageBox.warning(self, "Limit", "Maximum of 3 signatories allowed.")
             return
-
         widget = QWidget()
         layout = QVBoxLayout()
-
         name_input = QLineEdit()
         name_input.setPlaceholderText("Name")
         layout.addWidget(name_input)
-
         position_input = QLineEdit()
         position_input.setPlaceholderText("Position")
         layout.addWidget(position_input)
-
         upload_btn = QPushButton("Upload Signature")
         layout.addWidget(upload_btn)
-
         preview = QLabel("(No Image)")
         preview.setFixedHeight(50)
         preview.setFixedWidth(150)
         layout.addWidget(preview)
-
-        sig_data = {
-            "widget": widget, "name_input": name_input,
-            "position_input": position_input, "upload_btn": upload_btn,
-            "preview": preview, "signature_path": None
-        }
-
+        sig_data = {"widget": widget, "name_input": name_input,
+                    "position_input": position_input, "upload_btn": upload_btn,
+                    "preview": preview, "signature_path": None}
         def upload():
             path, _ = QFileDialog.getOpenFileName(
                 self, "Select Signature", "", "Image Files (*.png *.jpg *.jpeg)")
             if path:
                 sig_data["signature_path"] = path
                 preview.setPixmap(QPixmap(path).scaledToWidth(150))
-
         upload_btn.clicked.connect(upload)
         widget.setLayout(layout)
         self.signatories_layout.addWidget(widget)
@@ -232,64 +251,120 @@ class CertifyGUI(QWidget):
         self.signatories_layout.removeWidget(sig["widget"])
         sig["widget"].setParent(None)
 
-    # ---------------- EVENTS ----------------
+    # Events
     def refresh_event_list(self):
+        self.event_combo.blockSignals(True)
         self.event_combo.clear()
         events = [e.replace("_", " ") for e in os.listdir(EVENTS_DIR) if os.path.isdir(os.path.join(EVENTS_DIR, e))]
         if events:
             self.event_combo.addItems(events)
             self.output_log.append("Events loaded.")
+            self.load_event_metadata_ui()
         else:
             self.output_log.append("No events found.")
+            self.event_org_input.clear()
+            self.event_start_input.clear()
+            self.event_end_input.clear()
+        self.event_combo.blockSignals(False)
 
     def create_event(self):
         title = self.new_event_input.text().strip()
+        org = self.event_org_input.text().strip()
+        start_date = self.event_start_input.text().strip()
+        end_date = self.event_end_input.text().strip()
         if not title:
             QMessageBox.warning(self, "Error", "Enter event name.")
             return
+        # Validate dates
+        if start_date:
+            try: datetime.strptime(start_date, "%Y-%m-%d")
+            except ValueError: QMessageBox.warning(self, "Error", "Start date must be YYYY-MM-DD."); return
+        if end_date:
+            try: datetime.strptime(end_date, "%Y-%m-%d")
+            except ValueError: QMessageBox.warning(self, "Error", "End date must be YYYY-MM-DD."); return
         path = os.path.join(EVENTS_DIR, title.replace(" ", "_"))
         os.makedirs(path, exist_ok=True)
+        metadata = {"title": title, "organization": org, "start_date": start_date, "end_date": end_date}
+        metadata_path = os.path.join(path, "event.json")
+        with open(metadata_path, "w") as f: json.dump(metadata, f)
         self.new_event_input.clear()
+        self.event_org_input.clear()
+        self.event_start_input.clear()
+        self.event_end_input.clear()
         self.refresh_event_list()
         self.output_log.append(f"Event created: {title}")
 
-    # ---------------- CSV ----------------
+    def delete_event(self):
+        event = self.event_combo.currentText().strip()
+        if not event: return
+        reply = QMessageBox.question(self, "Delete Event", f"Are you sure you want to delete '{event}'?", QMessageBox.Yes | QMessageBox.No)
+        if reply == QMessageBox.Yes:
+            path = os.path.join(EVENTS_DIR, event.replace(" ", "_"))
+            import shutil
+            try:
+                shutil.rmtree(path)
+                self.refresh_event_list()
+                self.output_log.append(f"Deleted event: {event}")
+            except Exception as e:
+                self.output_log.append(f"Failed to delete event: {e}")
+
+    # CSV
     def add_participants_csv(self):
         event = self.event_combo.currentText().strip()
         if not event:
-            QMessageBox.warning(self, "Error", "Select an event.")
-            return
+            QMessageBox.warning(self, "Error", "Select an event."); return
         event_path = os.path.join(EVENTS_DIR, event.replace(" ", "_"))
         file_path, _ = QFileDialog.getOpenFileName(self, "Select CSV", "", "CSV Files (*.csv)")
-        if not file_path:
-            return
+        if not file_path: return
         df = pd.read_csv(file_path)
         df.to_csv(os.path.join(event_path, "participants.csv"), index=False)
         self.output_log.append(f"Imported {len(df)} participants.")
 
     def add_template(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Template", "", "Images (*.png *.jpg *.jpeg)")
-        if not file_path:
-            return
+        if not file_path: return
         dest_path = os.path.join(TEMPLATES_DIR, os.path.basename(file_path))
-        try:
-            import shutil
-            shutil.copy(file_path, dest_path)
-            self.output_log.append(f"Template added: {dest_path}")
-        except Exception as e:
-            self.output_log.append(f"Failed to add template: {e}")
+        import shutil
+        try: shutil.copy(file_path, dest_path); self.output_log.append(f"Template added: {dest_path}")
+        except Exception as e: self.output_log.append(f"Failed to add template: {e}")
 
-    # ---------------- CERTIFICATES ----------------
+    # Certificates
     def generate_certificates(self):
         event = self.event_combo.currentText().strip()
-        if not event:
-            QMessageBox.warning(self, "Error", "Select an event.")
-            return
+        if not event: QMessageBox.warning(self, "Error", "Select an event."); return
         event_path = os.path.join(EVENTS_DIR, event.replace(" ", "_"))
         participants_csv = os.path.join(event_path, "participants.csv")
         if not os.path.exists(participants_csv):
-            QMessageBox.warning(self, "Error", "Participants CSV missing.")
-            return
+            QMessageBox.warning(self, "Error", "Participants CSV missing."); return
+
+        # Read latest info from fields and save to JSON
+        org = self.event_org_input.text().strip()
+        start_date = self.event_start_input.text().strip()
+        end_date = self.event_end_input.text().strip()
+        metadata = {"title": event, "organization": org, "start_date": start_date, "end_date": end_date}
+        metadata_path = os.path.join(event_path, "event.json")
+        with open(metadata_path, "w") as f: json.dump(metadata, f)
+
+        # Format date range nicely
+        if start_date and end_date:
+            if start_date == end_date:
+                event_dates = datetime.strptime(start_date, '%Y-%m-%d').strftime('%B %-d, %Y')
+            else:
+                try:
+                    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+                    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+                    if start_dt.month == end_dt.month:
+                        event_dates = f"{start_dt.strftime('%B %-d')}–{end_dt.strftime('%-d, %Y')}"
+                    else:
+                        event_dates = f"{start_dt.strftime('%B %-d, %Y')}–{end_dt.strftime('%B %-d, %Y')}"
+                except:
+                    event_dates = f"{start_date} to {end_date}"
+        elif start_date:
+            event_dates = start_date
+        elif end_date:
+            event_dates = end_date
+        else:
+            event_dates = ""
 
         sign_data = []
         for s in self.signatories:
@@ -297,31 +372,27 @@ class CertifyGUI(QWidget):
             pos = s["position_input"].text().strip()
             if name and pos:
                 sign_data.append({"name": name, "position": pos, "signature_path": s["signature_path"]})
-        if not sign_data:
-            QMessageBox.warning(self, "Error", "At least one signatory required.")
-            return
+        if not sign_data: QMessageBox.warning(self, "Error", "At least one signatory required."); return
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         output_dir = os.path.join(event_path, "certificates", timestamp)
         os.makedirs(output_dir, exist_ok=True)
 
         template_file, _ = QFileDialog.getOpenFileName(self, "Select Template", TEMPLATES_DIR, "Images (*.png *.jpg *.jpeg)")
-        if not template_file:
-            template_file = os.path.join(TEMPLATES_DIR, "default_template.png")
+        if not template_file: template_file = os.path.join(TEMPLATES_DIR, "default_template.png")
 
         df = pd.read_csv(participants_csv)
         for _, participant in df.iterrows():
-            pdf_path = generate_certificate(participant, event, template_file, output_dir, sign_data)
+            pdf_path = generate_certificate(participant, event, org, event_dates, template_file, output_dir, sign_data)
             self.output_log.append(f"Generated: {pdf_path}")
 
-        import shutil
+        # Backup only certificates
         backup_path = os.path.join(BACKUP_DIR, f"backup_{event.replace(' ', '_')}_{timestamp}")
+        import shutil
         shutil.copytree(output_dir, backup_path)
         self.output_log.append(f"Backup saved: {backup_path}")
 
-# ------------------------
 # Main
-# ------------------------
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     window = CertifyGUI()
