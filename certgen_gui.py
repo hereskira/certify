@@ -35,6 +35,11 @@ def load_event_metadata(event_path):
     else:
         return {"organization": "", "start_date": "", "end_date": ""}
 
+def resource_path(relative_path):
+    """Get absolute path to resource, works for dev and PyInstaller."""
+    base_path = getattr(sys, "_MEIPASS", os.path.abspath("."))
+    return os.path.join(base_path, relative_path)
+
 def load_template(template_path):
     if not os.path.exists(template_path):
         return Image.new("RGB", (1200, 900), color="white")
@@ -42,7 +47,7 @@ def load_template(template_path):
 
 def draw_text(image, text, position, font_size=40):
     draw = ImageDraw.Draw(image)
-    font_path = os.path.join("fonts", "Roboto-VariableFont_wdth,wght.ttf")
+    font_path = resource_path(os.path.join("fonts", "Roboto-VariableFont_wdth,wght.ttf"))
     try:
         font = ImageFont.truetype(font_path, font_size)
     except:
@@ -179,6 +184,9 @@ class CertifyGUI(QWidget):
         btn_csv = QPushButton("Import Participants CSV")
         btn_csv.clicked.connect(self.add_participants_csv)
         cert_layout.addWidget(btn_csv)
+        btn_full_csv = QPushButton("Import Full Event CSV")
+        btn_full_csv.clicked.connect(self.import_full_event_csv)
+        cert_layout.addWidget(btn_full_csv)
         btn_template = QPushButton("Add Template")
         btn_template.clicked.connect(self.add_template)
         cert_layout.addWidget(btn_template)
@@ -320,6 +328,115 @@ class CertifyGUI(QWidget):
         df.to_csv(os.path.join(event_path, "participants.csv"), index=False)
         self.output_log.append(f"Imported {len(df)} participants.")
 
+    def import_full_event_csv(self):
+        file_path, _ = QFileDialog.getOpenFileName(self, "Select Full Event CSV", "", "CSV Files (*.csv)")
+        if not file_path: return
+        
+        try:
+            df = pd.read_csv(file_path)
+            
+            # Check for required columns
+            if 'name' not in df.columns:
+                QMessageBox.warning(self, "Error", "CSV must have a 'name' column for participants.")
+                return
+            
+            # Extract event name if present
+            if 'event_name' not in df.columns:
+                QMessageBox.warning(self, "Error", "CSV must have an 'event_name' column.")
+                return
+            
+            event_name = df['event_name'].iloc[0]
+            if not event_name or pd.isna(event_name):
+                QMessageBox.warning(self, "Error", "Event name cannot be empty.")
+                return
+            
+            event_name = str(event_name).strip()
+            event_path = os.path.join(EVENTS_DIR, event_name.replace(" ", "_"))
+            
+            # Check if event already exists
+            if os.path.exists(event_path):
+                QMessageBox.warning(self, "Error", f"Event '{event_name}' already exists. Please choose a different name or delete the existing event first.")
+                return
+            
+            # Create new event directory
+            os.makedirs(event_path, exist_ok=True)
+            
+            # Extract signatories if present
+            signatory_cols = ['signatory_name', 'signatory_position']
+            signatories_found = all(col in df.columns for col in signatory_cols)
+            
+            if signatories_found:
+                # Get unique signatories
+                sig_df = df[signatory_cols].drop_duplicates().dropna(subset=['signatory_name'])
+                
+                # Clear existing signatories
+                while self.signatories:
+                    self.remove_signatory()
+                
+                # Add signatories from CSV
+                for _, sig_row in sig_df.iterrows():
+                    if sig_row['signatory_name'].strip():
+                        widget = QWidget()
+                        layout = QVBoxLayout()
+                        name_input = QLineEdit()
+                        name_input.setText(str(sig_row['signatory_name']).strip())
+                        layout.addWidget(name_input)
+                        position_input = QLineEdit()
+                        position_input.setText(str(sig_row['signatory_position']).strip())
+                        layout.addWidget(position_input)
+                        upload_btn = QPushButton("Upload Signature")
+                        layout.addWidget(upload_btn)
+                        preview = QLabel("(No Image)")
+                        preview.setFixedHeight(50)
+                        preview.setFixedWidth(150)
+                        layout.addWidget(preview)
+                        sig_data = {"widget": widget, "name_input": name_input,
+                                    "position_input": position_input, "upload_btn": upload_btn,
+                                    "preview": preview, "signature_path": None}
+                        def upload(sig_data=sig_data):
+                            path, _ = QFileDialog.getOpenFileName(
+                                self, "Select Signature", "", "Image Files (*.png *.jpg *.jpeg)")
+                            if path:
+                                sig_data["signature_path"] = path
+                                sig_data["preview"].setPixmap(QPixmap(path).scaledToWidth(150))
+                        upload_btn.clicked.connect(upload)
+                        widget.setLayout(layout)
+                        self.signatories_layout.addWidget(widget)
+                        self.signatories.append(sig_data)
+                
+                self.output_log.append(f"Imported {len(sig_df)} signatories from CSV.")
+            
+            # Save participants (exclude signatory and event metadata columns)
+            participants_df = df[['name']].copy() if 'name' in df.columns else df
+            participants_df.to_csv(os.path.join(event_path, "participants.csv"), index=False)
+            self.output_log.append(f"Imported {len(participants_df)} participants.")
+            
+            # Import event metadata if present
+            org = df['organization'].iloc[0] if 'organization' in df.columns else ""
+            start_date = df['start_date'].iloc[0] if 'start_date' in df.columns else ""
+            end_date = df['end_date'].iloc[0] if 'end_date' in df.columns else ""
+            
+            # Save event metadata
+            metadata = {"title": event_name, "organization": str(org).strip() if org else "", 
+                       "start_date": str(start_date).strip() if start_date else "", 
+                       "end_date": str(end_date).strip() if end_date else ""}
+            metadata_path = os.path.join(event_path, "event.json")
+            with open(metadata_path, "w") as f: json.dump(metadata, f)
+            
+            # Update UI with event and metadata
+            self.refresh_event_list()
+            # Select the newly created event
+            index = self.event_combo.findText(event_name)
+            if index >= 0:
+                self.event_combo.setCurrentIndex(index)
+            
+            self.output_log.append(f"Event '{event_name}' created successfully.")
+            if org or start_date or end_date:
+                self.output_log.append("Event metadata saved.")
+        
+        except Exception as e:
+            QMessageBox.warning(self, "Error", f"Failed to import CSV: {str(e)}")
+
     def add_template(self):
         file_path, _ = QFileDialog.getOpenFileName(self, "Select Template", "", "Images (*.png *.jpg *.jpeg)")
         if not file_path: return
@@ -379,7 +496,7 @@ class CertifyGUI(QWidget):
         os.makedirs(output_dir, exist_ok=True)
 
         template_file, _ = QFileDialog.getOpenFileName(self, "Select Template", TEMPLATES_DIR, "Images (*.png *.jpg *.jpeg)")
-        if not template_file: template_file = os.path.join(TEMPLATES_DIR, "default_template.png")
+        if not template_file: return
 
         df = pd.read_csv(participants_csv)
         for _, participant in df.iterrows():
